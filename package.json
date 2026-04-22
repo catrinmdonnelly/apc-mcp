@@ -1,0 +1,49 @@
+{
+  "name": "apc-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for APC Overnight. Book, label, track and cancel UK parcel shipments from any MCP-compatible AI.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "apc-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node test/boot.mjs"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    ".env.example"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "apc",
+    "apc-overnight",
+    "shipping",
+    "parcel",
+    "uk",
+    "courier"
+  ],
+  "author": "Catrin Donnelly",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/catrinmdonnelly/apc-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/catrinmdonnelly/apc-mcp/issues"
+  },
+  "homepage": "https://github.com/catrinmdonnelly/apc-mcp#readme",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.0",
+    "zod": "^3.23.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
