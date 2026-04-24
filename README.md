@@ -11,15 +11,16 @@ Built against the [APC Overnight New Horizon API v3](https://apc-overnight.com/)
 
 ## What it does
 
-Exposes five tools to any AI that speaks MCP:
+Exposes six tools to any AI that speaks MCP:
 
 | Tool | What it does |
 |------|--------------|
-| `book_shipment`   | Create a consignment. Returns the 22-digit WayBill. |
-| `get_label`       | Fetch the shipping label. PDF, ZPL (thermal printers) or PNG. |
-| `track_shipment`  | Current status and full tracking history. |
-| `cancel_shipment` | Cancel a consignment before it's manifested. |
-| `list_services`   | Every APC service this MCP supports, with ProductCodes. |
+| `book_shipment`         | Create a consignment. Returns the 22-digit WayBill. |
+| `book_batch_and_label`  | Book many shipments at once and get back a single merged PDF of every label, ready to print. |
+| `get_label`             | Save a shipping label to disk. PDF, ZPL (thermal printers) or PNG. |
+| `track_shipment`        | Current status and full tracking history. |
+| `cancel_shipment`       | Cancel a consignment before it's manifested. |
+| `list_services`         | Every APC service this MCP supports, with ProductCodes. |
 
 Under the hood it talks to `https://apc.hypaship.com/api/3.0` using your APC account credentials.
 
@@ -34,6 +35,8 @@ Once the MCP is installed in your AI client, you can say things like:
 > *"Track all APC consignments from this week. Which ones haven't been delivered yet?"*
 
 > *"Print labels for these five waybills as ZPL so I can send them to the thermal printer."*
+
+> *"Here are ten orders — book them all on APC next-day and give me one PDF I can print."* (AI calls `book_batch_and_label` and returns the path to a merged PDF.)
 
 > *"Cancel waybill 2018041910099660000599. The customer cancelled the order."*
 
@@ -182,6 +185,23 @@ Your APC username and password grant full access to your account. Treat them lik
 - Never commit `.env` to git. The `.gitignore` in this repo already excludes it.
 - Don't paste credentials into chat messages or shared documents.
 - Rotate them in the APC portal if ever exposed.
+
+## Privacy & data handling
+
+This MCP runs entirely on your machine. No customer data, credentials or API traffic flows through any server owned or operated by the author.
+
+The data path is:
+
+- Shipping details you give your AI assistant go to your AI provider (e.g. Anthropic, if you're using Claude) under your account.
+- Booking requests go to APC Overnight using your APC credentials.
+- Labels are saved to your local disk at `~/Downloads/parcel-toolkit/` (overridable via the `PARCEL_TOOLKIT_LABELS_DIR` env var).
+
+If you're using this in a UK business, you are the data controller under UK GDPR. Practical recommendations:
+
+1. Use Claude Team, Claude Enterprise, or the Claude API directly — not consumer Claude.ai — so a Data Processing Agreement with Anthropic is in place. On consumer tiers, turn off "Help improve Claude" in Privacy settings at minimum.
+2. List Anthropic and APC Overnight as subprocessors in your privacy policy, the same way you would list a payment provider or email service.
+3. Avoid using this tool for special-category data (health, biometric, children's data) without additional legal review.
+4. This software is provided as-is under the MIT licence. The author is not a data processor and takes no responsibility for your compliance obligations — those sit with you as the data controller.
 
 ## Contributing
 

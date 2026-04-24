@@ -13,6 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as apc from './carriers/apc.js';
+import { saveLabelToDisk, mergeLabelsToPdf, timestamp } from './utils/labels.js';
 
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -35,7 +36,7 @@ if (existsSync(envPath)) {
 
 const server = new McpServer({
   name: 'apc-mcp',
-  version: '0.1.0',
+  version: '0.2.0',
 });
 
 const addressSchema = z.object({
@@ -115,14 +116,20 @@ server.tool(
 
 server.tool(
   'get_label',
-  'Get the shipping label for a booked APC consignment. Call 3-5 seconds after book_shipment. Returns base64-encoded label.',
+  'Get the shipping label for a booked APC consignment and save it to disk. Call any time after book_shipment — APC typically needs 3-5 seconds to generate, which this tool polls for automatically. Returns the local file path. Default save location is ~/Downloads/parcel-toolkit/, overridable via the PARCEL_TOOLKIT_LABELS_DIR env var.',
   {
-    waybill: z.string().describe('The 22-digit WayBill number returned when booking'),
-    format:  z.enum(['PDF', 'ZPL', 'PNG']).default('PDF').describe('Label format. PDF for standard printers, ZPL for thermal (Zebra/Rollo)'),
+    waybill: z.string().describe('The 22-digit WayBill number returned when booking (or from a previously booked consignment).'),
+    format:  z.enum(['PDF', 'ZPL', 'PNG']).default('PDF').describe('Label format. PDF for standard printers, ZPL for thermal (Zebra/Rollo), PNG for previews.'),
   },
   async ({ waybill, format }) => {
     try {
       const result = await apc.getLabel(waybill, format);
+      const extension = (result.format || format).toLowerCase();
+      const filePath = await saveLabelToDisk({
+        labelBase64: result.labelBase64,
+        filenameStem: `apc-${waybill}-${timestamp()}`,
+        extension,
+      });
       return {
         content: [{
           type: 'text',
@@ -130,7 +137,8 @@ server.tool(
             success: true,
             waybill,
             format: result.format,
-            labelBase64: result.labelBase64,
+            filePath,
+            message: `Label saved to ${filePath}. Open or drag the file to print.`,
           }, null, 2),
         }],
       };
@@ -140,6 +148,116 @@ server.tool(
         isError: true,
       };
     }
+  }
+);
+
+const perShipmentSchema = z.object({
+  numberOfPieces: z.number().int().min(1).describe('Number of parcels/items for this shipment'),
+  totalWeightKg:  z.number().positive().describe('Total weight in kg for this shipment'),
+  itemType: z.enum(['PARCEL', 'PACK', 'LIQUIDS', 'LIMITED QUANTITIES']).default('PARCEL'),
+  goodsValue: z.number().optional().describe('Declared value in GBP'),
+  goodsDescription: z.string().optional().describe('Brief description of goods'),
+  recipient: addressSchema.describe('Recipient / delivery address for this shipment'),
+  reference: z.string().optional().describe('Internal order reference for this shipment'),
+});
+
+server.tool(
+  'book_batch_and_label',
+  'Book multiple APC shipments at once and return a single merged PDF containing every label, ready to print. Use this when the user pastes a list of orders/addresses. All shipments share the same service, collection date and sender. Saves the merged PDF to ~/Downloads/parcel-toolkit/ (overridable via PARCEL_TOOLKIT_LABELS_DIR).',
+  {
+    service: z.string().describe('APC delivery service for every shipment in this batch (e.g. "next-day", "next-day-1200", "ND16"). Call list_services for the full catalogue.'),
+    collectionDate: z.string().describe('Collection date for every shipment. YYYY-MM-DD or DD/MM/YYYY'),
+    readyAt:  z.string().optional().describe('Time goods will be ready HH:MM (default 09:00)'),
+    closedAt: z.string().optional().describe('Time business closes HH:MM (default 17:00)'),
+    sender:   addressSchema.describe('Sender / collection address. Same for every shipment in the batch.'),
+    shipments: z.array(perShipmentSchema).min(1).describe('Array of shipments to book. Each entry is one consignment with its own recipient, weight and pieces.'),
+    labelFormat: z.enum(['PDF', 'ZPL', 'PNG']).default('PDF').describe('Label format for individual labels. PDF recommended — merged output is always PDF regardless.'),
+  },
+  async (params) => {
+    const { service, collectionDate, readyAt, closedAt, sender, shipments, labelFormat } = params;
+
+    const bookingResults = [];
+    const failures = [];
+    const labelsBase64 = [];
+
+    for (let i = 0; i < shipments.length; i++) {
+      const s = shipments[i];
+      const shipmentParams = {
+        service,
+        collectionDate,
+        readyAt,
+        closedAt,
+        numberOfPieces: s.numberOfPieces,
+        totalWeightKg:  s.totalWeightKg,
+        itemType: s.itemType,
+        goodsValue: s.goodsValue,
+        goodsDescription: s.goodsDescription,
+        sender,
+        recipient: s.recipient,
+        reference: s.reference,
+      };
+
+      try {
+        const booked = await apc.createConsignment(shipmentParams);
+        const waybill = booked.waybill;
+
+        const label = await apc.getLabel(waybill, labelFormat);
+        labelsBase64.push(label.labelBase64);
+
+        bookingResults.push({
+          index: i + 1,
+          recipient: `${s.recipient.contactName}, ${s.recipient.postcode}`,
+          waybill,
+          orderNumber: booked.orderNumber,
+          reference: s.reference || null,
+        });
+      } catch (err) {
+        failures.push({
+          index: i + 1,
+          recipient: `${s.recipient.contactName}, ${s.recipient.postcode}`,
+          error: err.message,
+        });
+      }
+    }
+
+    if (labelsBase64.length === 0) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            success: false,
+            booked: 0,
+            failed: failures.length,
+            failures,
+            message: 'No labels generated — all shipments failed. See failures for details.',
+          }, null, 2),
+        }],
+        isError: true,
+      };
+    }
+
+    const filePath = await mergeLabelsToPdf({
+      labelsBase64,
+      filenameStem: `apc-batch-${timestamp()}-${labelsBase64.length}labels`,
+    });
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          carrier: 'APC Overnight',
+          service,
+          collectionDate,
+          booked: bookingResults.length,
+          failed: failures.length,
+          shipments: bookingResults,
+          failures: failures.length ? failures : undefined,
+          mergedPdfPath: filePath,
+          message: `Booked ${bookingResults.length} of ${shipments.length} shipments. Merged PDF saved to ${filePath}. Open or drag to print.`,
+        }, null, 2),
+      }],
+    };
   }
 );
 

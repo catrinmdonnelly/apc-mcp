@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
-const EXPECTED = new Set(['book_shipment', 'get_label', 'track_shipment', 'cancel_shipment', 'list_services']);
+const EXPECTED = new Set(['book_shipment', 'book_batch_and_label', 'get_label', 'track_shipment', 'cancel_shipment', 'list_services']);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(__dirname, '../src/index.js');
 
