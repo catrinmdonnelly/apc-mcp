@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "apc": {
+      "command": "npx",
+      "args": ["-y", "apc-mcp@0.2.1"],
+      "env": {
+        "APC_USERNAME": "${user_config.apc_username}",
+        "APC_PASSWORD": "${user_config.apc_password}"
+      }
+    }
+  }
+}
