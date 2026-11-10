@@ -9,7 +9,27 @@
  *            Note: NOT the standard Authorization header
  */
 
-const BASE_URL = process.env.APC_BASE_URL || 'https://apc.hypaship.com/api/3.0';
+import { cleanText, cleanDeep, safeId, parseDate } from '../utils/text.js';
+
+const DEFAULT_BASE_URL = 'https://apc.hypaship.com/api/3.0';
+const REQUEST_TIMEOUT_MS = 30000;
+const MAYBE_BOOKED = ' The booking may still have gone through, so check your APC account before booking again.';
+
+// Read on every call. Credentials are only ever sent over https, or to a server on this computer.
+function baseUrl() {
+  const url = (process.env.APC_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('APC_BASE_URL is not a valid web address.');
+  }
+  const onThisComputer = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && onThisComputer)) {
+    throw new Error('APC_BASE_URL must start with https:// (plain http is only allowed for localhost).');
+  }
+  return url;
+}
 
 // ─── Service codes (from APC Integration Guide Edition 2.0.4, §3) ─────────────
 // User-friendly keys mapped to real APC ProductCode values. Pass either the
@@ -125,10 +145,9 @@ export const APC_ITEM_TYPES = ['PARCEL', 'PACK', 'LIQUIDS', 'LIMITED QUANTITIES'
 /**
  * Convert YYYY-MM-DD → DD/MM/YYYY (APC date format)
  */
-function toApcDate(isoDate) {
-  if (!isoDate) return null;
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(isoDate)) return isoDate;
-  const [y, m, d] = isoDate.split('-');
+function toApcDate(date) {
+  if (!date) return null;
+  const { y, m, d } = parseDate(date, 'The collection date');
   return `${d}/${m}/${y}`;
 }
 
@@ -143,7 +162,7 @@ function toApcDate(isoDate) {
  * (matches APC's wire format per Integration Guide §4).
  */
 function buildItems(params) {
-  const count = Math.max(1, parseInt(params.numberOfPieces, 10) || 1);
+  const count = Math.min(100, Math.max(1, parseInt(params.numberOfPieces, 10) || 1));
   const type  = params.itemType || 'PARCEL';
   const refBase = params.reference || '';
 
@@ -187,7 +206,7 @@ function getAuthHeader() {
 
   if (!username || !password) {
     throw new Error(
-      'APC credentials not set. Add APC_USERNAME and APC_PASSWORD to your .env file.'
+      'APC credentials not set. Add APC_USERNAME and APC_PASSWORD to the MCP server settings, or to a .env file if you run it by hand.'
     );
   }
 
@@ -196,7 +215,7 @@ function getAuthHeader() {
 }
 
 async function request(method, path, body = null) {
-  const url = `${BASE_URL}${path}`;
+  const url = `${baseUrl()}${path}`;
 
   const options = {
     method,
@@ -205,20 +224,37 @@ async function request(method, path, body = null) {
       'Content-Type': 'application/json',
       'Accept':       'application/json',
     },
+    // The credentials travel in a custom header, so never follow a redirect to another address.
+    redirect: 'error',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   };
 
   if (body) {
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, options);
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`APC API ${response.status}: ${error}`);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (err) {
+    if (err?.name === 'TimeoutError') {
+      throw new Error(`APC did not reply within ${REQUEST_TIMEOUT_MS / 1000} seconds.${method === 'POST' ? MAYBE_BOOKED : ''}`);
+    }
+    throw new Error(`Could not reach APC (${cleanText(err?.cause?.code || err?.message, 100)}).${method === 'POST' ? MAYBE_BOOKED : ''}`);
   }
 
-  return response.json();
+  if (!response.ok) {
+    const error = await response.text().catch(() => '');
+    const failure = new Error(`APC API ${response.status}: ${cleanText(error, 300)}${method === 'POST' && response.status >= 500 ? MAYBE_BOOKED : ''}`);
+    failure.status = response.status;
+    throw failure;
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`APC sent a reply that could not be read.${method === 'POST' ? MAYBE_BOOKED : ''}`);
+  }
 }
 
 // ─── Service availability (optional pre-check) ────────────────────────────────
@@ -272,7 +308,7 @@ export async function checkServiceAvailability({
 // ─── Place order (book a consignment) ────────────────────────────────────────
 
 export async function createConsignment(params) {
-  const productCode = APC_SERVICES[params.service] || params.service || 'ND16';
+  const productCode = (Object.hasOwn(APC_SERVICES, params.service) ? APC_SERVICES[params.service] : params.service) || 'ND16';
 
   const body = {
     Orders: {
@@ -336,23 +372,33 @@ export async function createConsignment(params) {
   const result = await request('POST', '/Orders.json', body);
 
   const order = result?.Orders?.Order;
+  const messages = result?.Orders?.Messages;
+  // A reply that carries a waybill is a booking, even if APC attached a warning code to it.
+  const waybill = order?.WayBill ? cleanText(order.WayBill, 40) : undefined;
   return {
-    success:        result?.Orders?.Messages?.Code === 'SUCCESS',
-    waybill:        order?.WayBill,
-    orderNumber:    order?.OrderNumber,
-    productCode:    order?.ProductCode,
-    collectionDate: order?.CollectionDate,
-    raw: result,
+    success:        messages?.Code === 'SUCCESS' || Boolean(waybill),
+    waybill,
+    orderNumber:    cleanText(order?.OrderNumber, 40),
+    productCode:    cleanText(order?.ProductCode, 20),
+    collectionDate: cleanText(order?.CollectionDate, 20),
+    message:        cleanText(messages?.Description || messages?.Code || '', 200),
   };
 }
 
 // ─── Get label ────────────────────────────────────────────────────────────────
 
-export async function getLabel(waybill, format = 'PDF', { retries = 4, retryDelayMs = 3000 } = {}) {
-  const path = `/Orders/${waybill}.json?labelformat=${format}&markprinted=True&searchtype=CarrierWaybill&labels=True`;
+export async function getLabel(
+  waybill,
+  format = 'PDF',
+  { retries = 4, retryDelayMs = Number(process.env.APC_LABEL_RETRY_DELAY_MS) || 3000 } = {}
+) {
+  const id = safeId(waybill, 'The waybill');
+  const path = `/Orders/${encodeURIComponent(id)}.json?labelformat=${encodeURIComponent(format)}&markprinted=True&searchtype=CarrierWaybill&labels=True`;
 
   let lastError;
+  let attempts = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    attempts++;
     try {
       const result = await request('GET', path);
       const items = result?.Orders?.Order?.ShipmentDetails?.Items?.Item;
@@ -366,13 +412,15 @@ export async function getLabel(waybill, format = 'PDF', { retries = 4, retryDela
         return {
           success: true,
           waybill,
-          format:      label.Format || format,
+          format:      cleanText(label.Format || format, 10),
           labelBase64: label.Content,
         };
       }
       lastError = new Error('Label not yet available');
     } catch (err) {
       lastError = err;
+      // A refusal for the account or the request will not change on a retry.
+      if ([400, 401, 403].includes(err.status)) break;
     }
 
     if (attempt < retries) {
@@ -381,27 +429,28 @@ export async function getLabel(waybill, format = 'PDF', { retries = 4, retryDela
   }
 
   throw new Error(
-    `Label not available after ${retries + 1} attempts over ~${((retries + 1) * retryDelayMs) / 1000}s. ` +
-    `APC may still be generating it — try calling get_label again in a moment. ` +
-    `Last error: ${lastError?.message}`
+    `Label not available after ${attempts} attempt${attempts === 1 ? '' : 's'}. ` +
+    `APC may still be generating it, so try get_label again in a moment. ` +
+    `Last error: ${cleanText(lastError?.message, 300)}`
   );
 }
 
 // ─── Track consignment ────────────────────────────────────────────────────────
 
 export async function trackConsignment(waybill) {
-  const path = `/Tracks/${waybill}.json?searchtype=CarrierWaybill&history=yes`;
+  const id = safeId(waybill, 'The waybill');
+  const path = `/Tracks/${encodeURIComponent(id)}.json?searchtype=CarrierWaybill&history=yes`;
   const result = await request('GET', path);
 
   const tracks = result?.Tracks;
   const track  = Array.isArray(tracks?.Track) ? tracks.Track[0] : tracks?.Track;
+  const events = Array.isArray(tracks?.Track) ? tracks.Track : (track ? [track] : []);
 
   return {
     success: true,
-    waybill,
-    status: track?.Status || track?.Description || 'Unknown',
-    events: Array.isArray(tracks?.Track) ? tracks.Track : (track ? [track] : []),
-    raw: result,
+    waybill: id,
+    status: cleanText(track?.Status || track?.Description || 'Unknown', 120),
+    events: cleanDeep(events),
   };
 }
 
@@ -417,13 +466,15 @@ export async function cancelConsignment(waybill) {
     },
   };
 
-  const result = await request('PUT', `/Orders/${waybill}.json?searchtype=CarrierWaybill`, body);
+  const id = safeId(waybill, 'The waybill');
+  const result = await request('PUT', `/Orders/${encodeURIComponent(id)}.json?searchtype=CarrierWaybill`, body);
 
   const messages = result?.CancelOrder?.Messages;
+  const description = String(messages?.Description || '');
+  const refused = /\b(not|cannot|can't|unable|failed|fail)\b/i.test(description);
   return {
-    success: messages?.Code === '121' || /cancelled/i.test(messages?.Description || ''),
-    waybill,
-    message: messages?.Description || 'Cancellation request sent.',
-    raw: result,
+    success: messages?.Code === '121' || (/\bcancell?ed\b/i.test(description) && !refused),
+    waybill: id,
+    message: cleanText(messages?.Description || 'Cancellation request sent.', 200),
   };
 }

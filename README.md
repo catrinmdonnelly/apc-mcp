@@ -36,11 +36,11 @@ Once the MCP is installed in your AI client, you can say things like:
 
 > *"Print labels for these five waybills as ZPL so I can send them to the thermal printer."*
 
-> *"Here are ten orders — book them all on APC next-day and give me one PDF I can print."* (AI calls `book_batch_and_label` and returns the path to a merged PDF.)
+> *"Here are ten orders, book them all on APC next-day and give me one PDF I can print."* (AI calls `book_batch_and_label` and returns the path to a merged PDF.)
 
 > *"Cancel waybill 2018041910099660000599. The customer cancelled the order."*
 
-> *"What's the cheapest APC service that arrives before noon tomorrow?"* (AI calls `list_services` and reasons)
+> *"Which APC services deliver before noon tomorrow?"* (AI calls `list_services` and reads the list)
 
 The AI handles address parsing, service selection and error recovery. You handle the business decisions.
 
@@ -51,8 +51,8 @@ Plugged into any AI agent, this MCP can automate real shipping operations:
 - **Daily order fulfilment.** Every morning, your AI reads new orders from your ecommerce platform, books each one with APC at the right service level, and posts tracking numbers back to the customer.
 - **Thermal-printer workflows.** Get labels as ZPL and pipe them straight to Zebra, Rollo or similar printers without any PDF conversion step.
 - **Same-day cut-off triage.** Before the APC cut-off, your AI checks which orders still qualify for next-day-by-10am versus standard next-day, and books the fastest available service for each.
-- **Bulk manifests.** Hand your AI a spreadsheet of hundreds of consignments. It books them all, groups labels into one document per depot, and flags any that failed validation.
-- **Multi-carrier picking.** Installed alongside [royalmail-mcp](https://github.com/catrinmdonnelly/royalmail-mcp), your AI compares APC and Royal Mail at booking time and picks the cheapest or fastest option per destination.
+- **Bulk manifests.** Hand your AI a spreadsheet of consignments. It books up to 50 at a time, puts the labels in one PDF, and reports any that failed, so check the list before you approve because every booking costs money.
+- **Multi-carrier picking.** Installed alongside [royalmail-mcp](https://github.com/catrinmdonnelly/royalmail-mcp), your AI can book each parcel with whichever carrier you tell it to. Neither tool returns prices, so the choice is yours.
 - **Customer service triage.** When a customer asks where their parcel is, your AI calls `track_shipment`, summarises the latest scan in plain English, and drafts a reply.
 
 ## Compatibility
@@ -133,7 +133,7 @@ Add to `~/.cursor/mcp.json`:
 
 ## Supported services
 
-A selection of the most common codes — run `list_services` for the full catalogue of 60+ ProductCodes covering every APC product type.
+A selection of the most common codes, run `list_services` for the full catalogue of 60+ ProductCodes covering every APC product type.
 
 | Key | APC service | ProductCode |
 |-----|-------------|-------------|
@@ -153,9 +153,9 @@ A selection of the most common codes — run `list_services` for the full catalo
 | `ireland-road`             | 2-5 Day Road Service to Ireland      | `ROAD` |
 | `second-class-mail`        | 2nd Class Mail (Whistl)              | `POST` |
 
-Plus 45 more, including all 09:00 / 10:00 / 12:00 variants of each product type, every Saturday variant, and 2-5 day economy versions of lightweight, courier-pack, mail-pack, liquid and non-conveyable.
+Plus 50 more (65 in all), including all 09:00 / 10:00 / 12:00 variants of each product type, every Saturday variant, and 2-5 day economy versions of lightweight, courier-pack, mail-pack, liquid and non-conveyable.
 
-You can pass either the friendly key (`next-day`) or the raw ProductCode (`ND16`). Both work. Which services your account can use depends on your APC contract — confirm with your depot for unusual codes.
+You can pass either the friendly key (`next-day`) or the raw ProductCode (`ND16`). Both work. Which services your account can use depends on your APC contract, so confirm with your depot for unusual codes.
 
 ## Notes
 
@@ -167,16 +167,16 @@ You can pass either the friendly key (`next-day`) or the raw ProductCode (`ND16`
 
 Not every `ProductCode` is enabled on every APC account. Timed services (09:00, 10:00), 2-5 day economy (`TDAY`) and specialised products (Liquid, Limited Quantity, Non-Conveyable) are often add-ons you have to ask your depot to enable.
 
-If you see these responses, it's an account or routing issue — not a bug in this MCP:
+If you see these responses, it's an account or routing issue, not a bug in this MCP:
 
-- **`228 NO Services available`** — the requested service isn't enabled on your account for that collection/delivery postcode pair.
-- **`119 ProductCode (XXXX) is not one of the possible options`** — that code isn't on your contract at all.
+- **`228 NO Services available`**: the requested service isn't enabled on your account for that collection/delivery postcode pair.
+- **`119 ProductCode (XXXX) is not one of the possible options`**: that code isn't on your contract at all.
 
 Call your APC depot or the CMS Team (01922 702587) to have extra services enabled.
 
 ### Multi-piece consignments
 
-When `numberOfPieces > 1`, the MCP automatically splits `totalWeightKg` evenly across the parcels and sends one `Item` entry per piece (APC requires `NumberOfPieces` to match the number of items). If you need different weights or dimensions per parcel, pass a full `items` array — the MCP will use it verbatim.
+When `numberOfPieces > 1`, the MCP automatically splits `totalWeightKg` evenly across the parcels and sends one `Item` entry per piece (APC requires `NumberOfPieces` to match the number of items). If you need different weights or dimensions per parcel, book each one as its own shipment.
 
 ## Security
 
@@ -198,10 +198,10 @@ The data path is:
 
 If you're using this in a UK business, you are the data controller under UK GDPR. Practical recommendations:
 
-1. Use Claude Team, Claude Enterprise, or the Claude API directly — not consumer Claude.ai — so a Data Processing Agreement with Anthropic is in place. On consumer tiers, turn off "Help improve Claude" in Privacy settings at minimum.
+1. Use Claude Team, Claude Enterprise, or the Claude API directly, not consumer Claude.ai, so a Data Processing Agreement with Anthropic is in place. On consumer tiers, turn off "Help improve Claude" in Privacy settings at minimum.
 2. List Anthropic and APC Overnight as subprocessors in your privacy policy, the same way you would list a payment provider or email service.
 3. Avoid using this tool for special-category data (health, biometric, children's data) without additional legal review.
-4. This software is provided as-is under the MIT licence. The author is not a data processor and takes no responsibility for your compliance obligations — those sit with you as the data controller.
+4. This software is provided as-is under the MIT licence. The author is not a data processor and takes no responsibility for your compliance obligations, those sit with you as the data controller.
 
 ## Contributing
 

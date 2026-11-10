@@ -13,7 +13,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as apc from './carriers/apc.js';
-import { saveLabelToDisk, mergeLabelsToPdf, timestamp } from './utils/labels.js';
+import { saveLabelToDisk, mergeLabelsTolerant, recordBooking, safeExtension, timestamp } from './utils/labels.js';
+import { cleanText } from './utils/text.js';
 
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -29,7 +30,10 @@ if (existsSync(envPath)) {
     if (!trimmed || trimmed.startsWith('#')) continue;
     const [key, ...rest] = trimmed.split('=');
     if (key && rest.length) {
-      process.env[key.trim()] = rest.join('=').trim().replace(/^["']|["']$/g, '');
+      // Settings passed in by the MCP client win over this file.
+      if (process.env[key.trim()] === undefined) {
+        process.env[key.trim()] = rest.join('=').trim().replace(/^["']|["']$/g, '');
+      }
     }
   }
 }
@@ -61,7 +65,7 @@ server.tool(
       'APC delivery service. Pass a friendly key (e.g. "next-day", "saturday-1200", ' +
       '"courier-pack", "liquid-0900", "ireland-road") or the raw ProductCode (e.g. "ND16", ' +
       '"NS12", "CP16", "LP09", "ROAD"). Call list_services for the full catalogue. ' +
-      'Defaults to ND16 (standard next day by 16:00) if omitted.'
+      'Required: ask which service is wanted rather than guessing.'
     ),
 
     collectionDate: z.string().describe('Collection date. YYYY-MM-DD or DD/MM/YYYY'),
@@ -69,8 +73,8 @@ server.tool(
     readyAt:   z.string().optional().describe('Time goods will be ready HH:MM (default 09:00)'),
     closedAt:  z.string().optional().describe('Time business closes HH:MM (default 17:00)'),
 
-    numberOfPieces: z.number().int().min(1).describe('Number of parcels/items in this consignment'),
-    totalWeightKg:  z.number().positive().describe('Total weight in kg'),
+    numberOfPieces: z.number().int().min(1).max(50).describe('Number of parcels/items in this consignment (1 to 50)'),
+    totalWeightKg:  z.number().positive().max(2000).describe('Total weight in kg'),
 
     itemType: z.enum(['PARCEL', 'PACK', 'LIQUIDS', 'LIMITED QUANTITIES'])
       .default('PARCEL')
@@ -84,14 +88,22 @@ server.tool(
 
     reference: z.string().optional().describe('Your internal order or job reference'),
   },
+  { title: 'Book an APC shipment', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   async (params) => {
     try {
       const result = await apc.createConsignment(params);
+      if (!result.success) {
+        return {
+          content: [{ type: 'text', text: `APC did not confirm the booking${result.message ? `: ${result.message}` : '.'}` }],
+          isError: true,
+        };
+      }
+      await recordBooking({ carrier: 'APC', waybill: result.waybill, recipient: `${params.recipient.contactName}, ${params.recipient.postcode}`, reference: params.reference || null });
       return {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            success: result.success,
+            success: true,
             carrier: 'APC Overnight',
             waybill: result.waybill,
             orderNumber: result.orderNumber,
@@ -101,6 +113,7 @@ server.tool(
             pieces: params.numberOfPieces,
             weightKg: params.totalWeightKg,
             recipient: `${params.recipient.contactName}, ${params.recipient.postcode}`,
+            warning: result.message && result.message !== 'SUCCESS' ? result.message : undefined,
             note: 'Wait 3-5 seconds before calling get_label with the waybill.',
           }, null, 2),
         }],
@@ -116,15 +129,16 @@ server.tool(
 
 server.tool(
   'get_label',
-  'Get the shipping label for a booked APC consignment and save it to disk. Call any time after book_shipment — APC typically needs 3-5 seconds to generate, which this tool polls for automatically. Returns the local file path. Default save location is ~/Downloads/parcel-toolkit/, overridable via the PARCEL_TOOLKIT_LABELS_DIR env var.',
+  'Get the shipping label for a booked APC consignment and save it to disk. Call any time after book_shipment. APC typically needs 3-5 seconds to generate it, which this tool waits for automatically. APC marks the consignment as printed once the label has been fetched. Returns the local file path. Default save location is ~/Downloads/parcel-toolkit/, overridable via the PARCEL_TOOLKIT_LABELS_DIR env var.',
   {
     waybill: z.string().describe('The 22-digit WayBill number returned when booking (or from a previously booked consignment).'),
     format:  z.enum(['PDF', 'ZPL', 'PNG']).default('PDF').describe('Label format. PDF for standard printers, ZPL for thermal (Zebra/Rollo), PNG for previews.'),
   },
+  { title: 'Get an APC shipping label', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   async ({ waybill, format }) => {
     try {
       const result = await apc.getLabel(waybill, format);
-      const extension = (result.format || format).toLowerCase();
+      const extension = safeExtension(result.format, format.toLowerCase());
       const filePath = await saveLabelToDisk({
         labelBase64: result.labelBase64,
         filenameStem: `apc-${waybill}-${timestamp()}`,
@@ -152,8 +166,8 @@ server.tool(
 );
 
 const perShipmentSchema = z.object({
-  numberOfPieces: z.number().int().min(1).describe('Number of parcels/items for this shipment'),
-  totalWeightKg:  z.number().positive().describe('Total weight in kg for this shipment'),
+  numberOfPieces: z.number().int().min(1).max(50).describe('Number of parcels/items for this shipment (1 to 50)'),
+  totalWeightKg:  z.number().positive().max(2000).describe('Total weight in kg for this shipment'),
   itemType: z.enum(['PARCEL', 'PACK', 'LIQUIDS', 'LIMITED QUANTITIES']).default('PARCEL'),
   goodsValue: z.number().optional().describe('Declared value in GBP'),
   goodsDescription: z.string().optional().describe('Brief description of goods'),
@@ -163,64 +177,59 @@ const perShipmentSchema = z.object({
 
 server.tool(
   'book_batch_and_label',
-  'Book multiple APC shipments at once and return a single merged PDF containing every label, ready to print. Use this when the user pastes a list of orders/addresses. All shipments share the same service, collection date and sender. Saves the merged PDF to ~/Downloads/parcel-toolkit/ (overridable via PARCEL_TOOLKIT_LABELS_DIR).',
+  'Book multiple APC shipments at once (up to 50), then fetch the labels. Every shipment booked costs money. PDF labels are merged into one file, ready to print; ZPL and PNG labels are saved as one file each. Use this when the user pastes a list of orders/addresses. All shipments share the same service, collection date and sender. A shipment that is booked but whose label could not be fetched is still reported with its waybill, so never book it again; use get_label instead. Saves to ~/Downloads/parcel-toolkit/ (overridable via PARCEL_TOOLKIT_LABELS_DIR).',
   {
     service: z.string().describe('APC delivery service for every shipment in this batch (e.g. "next-day", "next-day-1200", "ND16"). Call list_services for the full catalogue.'),
     collectionDate: z.string().describe('Collection date for every shipment. YYYY-MM-DD or DD/MM/YYYY'),
     readyAt:  z.string().optional().describe('Time goods will be ready HH:MM (default 09:00)'),
     closedAt: z.string().optional().describe('Time business closes HH:MM (default 17:00)'),
     sender:   addressSchema.describe('Sender / collection address. Same for every shipment in the batch.'),
-    shipments: z.array(perShipmentSchema).min(1).describe('Array of shipments to book. Each entry is one consignment with its own recipient, weight and pieces.'),
-    labelFormat: z.enum(['PDF', 'ZPL', 'PNG']).default('PDF').describe('Label format for individual labels. PDF recommended — merged output is always PDF regardless.'),
+    shipments: z.array(perShipmentSchema).min(1).max(50).describe('Array of shipments to book, at most 50. Each entry is one consignment with its own recipient, weight and pieces.'),
+    labelFormat: z.enum(['PDF', 'ZPL', 'PNG']).default('PDF').describe('Label format. PDF labels are merged into one file. ZPL (thermal printers) and PNG labels are saved as one file per shipment.'),
   },
+  { title: 'Book several APC shipments and print their labels', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   async (params) => {
     const { service, collectionDate, readyAt, closedAt, sender, shipments, labelFormat } = params;
 
-    const bookingResults = [];
+    // Step 1: book every shipment. Nothing after this may hide a booking that has been made.
+    const booked = [];
     const failures = [];
-    const labelsBase64 = [];
 
     for (let i = 0; i < shipments.length; i++) {
       const s = shipments[i];
-      const shipmentParams = {
-        service,
-        collectionDate,
-        readyAt,
-        closedAt,
-        numberOfPieces: s.numberOfPieces,
-        totalWeightKg:  s.totalWeightKg,
-        itemType: s.itemType,
-        goodsValue: s.goodsValue,
-        goodsDescription: s.goodsDescription,
-        sender,
-        recipient: s.recipient,
-        reference: s.reference,
-      };
-
+      const recipient = `${s.recipient.contactName}, ${s.recipient.postcode}`;
       try {
-        const booked = await apc.createConsignment(shipmentParams);
-        const waybill = booked.waybill;
-
-        const label = await apc.getLabel(waybill, labelFormat);
-        labelsBase64.push(label.labelBase64);
-
-        bookingResults.push({
+        const result = await apc.createConsignment({
+          service,
+          collectionDate,
+          readyAt,
+          closedAt,
+          numberOfPieces: s.numberOfPieces,
+          totalWeightKg:  s.totalWeightKg,
+          itemType: s.itemType,
+          goodsValue: s.goodsValue,
+          goodsDescription: s.goodsDescription,
+          sender,
+          recipient: s.recipient,
+          reference: s.reference,
+        });
+        if (!result.success || !result.waybill) {
+          throw new Error(result.message || 'APC did not confirm the booking.');
+        }
+        booked.push({
           index: i + 1,
-          recipient: `${s.recipient.contactName}, ${s.recipient.postcode}`,
-          waybill,
-          orderNumber: booked.orderNumber,
+          recipient,
+          waybill: result.waybill,
+          orderNumber: result.orderNumber,
           reference: s.reference || null,
         });
+        await recordBooking({ carrier: 'APC', waybill: result.waybill, recipient, reference: s.reference || null });
       } catch (err) {
-        failures.push({
-          index: i + 1,
-          recipient: `${s.recipient.contactName}, ${s.recipient.postcode}`,
-          error: err.message,
-        });
+        failures.push({ index: i + 1, recipient, error: cleanText(err.message, 300) });
       }
     }
 
-    if (labelsBase64.length === 0) {
+    if (booked.length === 0) {
       return {
         content: [{
           type: 'text',
@@ -229,17 +238,67 @@ server.tool(
             booked: 0,
             failed: failures.length,
             failures,
-            message: 'No labels generated — all shipments failed. See failures for details.',
+            message: 'Nothing was booked. See failures for details.',
           }, null, 2),
         }],
         isError: true,
       };
     }
 
-    const filePath = await mergeLabelsToPdf({
-      labelsBase64,
-      filenameStem: `apc-batch-${timestamp()}-${labelsBase64.length}labels`,
-    });
+    // Step 2: fetch the labels. A label that cannot be fetched leaves the booking in place.
+    const labels = [];
+    for (const entry of booked) {
+      try {
+        labels.push({ entry, label: await apc.getLabel(entry.waybill, labelFormat) });
+      } catch (err) {
+        entry.labelError = cleanText(err.message, 300);
+      }
+    }
+
+    // Step 3: save them. PDFs become one file, other formats stay one file per shipment.
+    let mergedPdfPath;
+    let mergeError;
+    if (labels.length > 0 && labelFormat === 'PDF') {
+      try {
+        const merge = await mergeLabelsTolerant({
+          labels: labels.map(({ entry, label }) => ({ id: entry.waybill, labelBase64: label.labelBase64 })),
+          filenameStem: `apc-batch-${timestamp()}-${labels.length}labels`,
+        });
+        mergedPdfPath = merge.path;
+        for (const { id, error } of merge.skipped) {
+          const entry = booked.find((b) => b.waybill === id);
+          if (entry) entry.labelError = error;
+        }
+      } catch (err) {
+        mergeError = cleanText(err.message, 300);
+      }
+    } else {
+      for (const { entry, label } of labels) {
+        try {
+          entry.labelFile = await saveLabelToDisk({
+            labelBase64: label.labelBase64,
+            filenameStem: `apc-${entry.waybill}-${timestamp()}`,
+            extension: safeExtension(label.format, labelFormat.toLowerCase()),
+          });
+        } catch (err) {
+          entry.labelError = cleanText(err.message, 300);
+        }
+      }
+    }
+
+    const withoutLabel = booked.filter((b) => (mergeError ? true : (labelFormat === 'PDF' ? b.labelError : !b.labelFile)));
+    const bookingsFile = 'bookings.jsonl in the labels folder';
+    const parts = [`Booked ${booked.length} of ${shipments.length} shipments. Each booking is also written to ${bookingsFile}.`];
+    if (mergedPdfPath) parts.push(`Merged PDF saved to ${mergedPdfPath}.`);
+    if (withoutLabel.length > 0) {
+      parts.push(
+        `${withoutLabel.length} booked shipment${withoutLabel.length === 1 ? ' has' : 's have'} no saved label yet. ` +
+        `They are booked, so do not book them again. Call get_label with each waybill to try again.`
+      );
+    }
+    if (failures.length > 0) {
+      parts.push(`${failures.length} shipment${failures.length === 1 ? ' was' : 's were'} not booked. If an error says the booking may still have gone through, check your APC account before booking it again, because no waybill came back to track.`);
+    }
 
     return {
       content: [{
@@ -249,12 +308,13 @@ server.tool(
           carrier: 'APC Overnight',
           service,
           collectionDate,
-          booked: bookingResults.length,
+          booked: booked.length,
           failed: failures.length,
-          shipments: bookingResults,
+          shipments: booked,
           failures: failures.length ? failures : undefined,
-          mergedPdfPath: filePath,
-          message: `Booked ${bookingResults.length} of ${shipments.length} shipments. Merged PDF saved to ${filePath}. Open or drag to print.`,
+          mergedPdfPath,
+          mergeError,
+          message: parts.join(' '),
         }, null, 2),
       }],
     };
@@ -267,6 +327,7 @@ server.tool(
   {
     waybill: z.string().describe('The 22-digit WayBill number'),
   },
+  { title: 'Track an APC shipment', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   async ({ waybill }) => {
     try {
       const result = await apc.trackConsignment(waybill);
@@ -296,6 +357,7 @@ server.tool(
   {
     waybill: z.string().describe('The 22-digit WayBill number to cancel'),
   },
+  { title: 'Cancel an APC shipment', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   async ({ waybill }) => {
     try {
       const result = await apc.cancelConsignment(waybill);
@@ -320,8 +382,9 @@ server.tool(
 
 server.tool(
   'list_services',
-  'List every APC Overnight delivery service with friendly key, label and ProductCode. Service availability depends on your APC account and routing — confirm with your depot before relying on an unusual service.',
+  'List every APC Overnight delivery service with friendly key, label and ProductCode. Service availability depends on your APC account and routing, so confirm with your depot before relying on an unusual service.',
   {},
+  { title: 'List APC services', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async () => ({
     content: [{
       type: 'text',
@@ -412,7 +475,7 @@ server.tool(
           // 2nd class mail (via Whistl)
           { key: 'second-class-mail',               label: '2nd Class Mail (Whistl)',            code: 'POST' },
         ],
-        note: 'Pass either the friendly key (e.g. "next-day") or the raw ProductCode (e.g. "ND16") to book_shipment. Service availability depends on your APC contract and destination — confirm with your depot.',
+        note: 'These services are for UK addresses; the tools book UK addresses only. Pass either the friendly key (e.g. "next-day") or the raw ProductCode (e.g. "ND16") to book_shipment. Service availability depends on your APC contract and destination, so confirm with your depot.',
       }, null, 2),
     }],
   })

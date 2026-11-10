@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.catrinmdonnelly/apc-mcp",
+  "description": "Book, label, track and cancel APC Overnight UK parcels from any MCP client.",
+  "repository": {
+    "url": "https://github.com/catrinmdonnelly/apc-mcp",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "apc-mcp",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "APC_USERNAME",
+          "description": "The email you use to log in to the APC portal. Your account needs API access.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "APC_PASSWORD",
+          "description": "The password you use to log in to the APC portal.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

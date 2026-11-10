@@ -1,6 +1,7 @@
 {
   "name": "apc-mcp",
   "version": "0.2.1",
+  "mcpName": "io.github.catrinmdonnelly/apc-mcp",
   "description": "MCP server for APC Overnight. Book, label, track and cancel UK parcel shipments from any MCP-compatible AI.",
   "type": "module",
   "main": "src/index.js",
@@ -10,14 +11,13 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node test/boot.mjs"
+    "test": "node test/boot.mjs && node test/safety.mjs"
   },
   "files": [
     "src",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md",
-    ".env.example"
+    "CHANGELOG.md"
   ],
   "keywords": [
     "mcp",
